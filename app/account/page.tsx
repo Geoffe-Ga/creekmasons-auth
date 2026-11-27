@@ -1,5 +1,7 @@
 import { UserButton } from "@clerk/nextjs";
 import { auth } from "@clerk/nextjs/server";
+import Link from "next/link";
+import { macroPilotConfig } from "@/lib/pilot-config";
 import { Suspense } from "react";
 
 async function AccountContent() {
@@ -14,6 +16,7 @@ async function AccountContent() {
         <h1>Your account</h1>
         <p>You’re signed in to Creekmasons. Use the account menu to manage your profile or sign out.</p>
         <UserButton showName />
+        {macroPilotConfig() && <p><Link href="/account/pilot">Macro Goblin pilot</Link></p>}
       </div>
     </div>
   );
