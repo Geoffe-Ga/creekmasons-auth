@@ -1,7 +1,7 @@
 import { clerkClient } from "@clerk/nextjs/server";
 import { createHash, timingSafeEqual } from "node:crypto";
-import { macroPilotConfig } from "@/lib/pilot-config";
-import { authorizeMacro, withPilotStore } from "@/lib/pilot-store";
+import { isPilotProduct, pilotConfig } from "@/lib/pilot-config";
+import { authorizeProduct, withPilotStore } from "@/lib/pilot-store";
 
 function denial(status: number) {
   return Response.json({}, { status, headers: { "Cache-Control": "no-store" } });
@@ -15,8 +15,10 @@ function epochSeconds(timestamp: number) {
   return timestamp > 100_000_000_000 ? Math.floor(timestamp / 1000) : timestamp;
 }
 
-export async function POST(request: Request) {
-  const config = macroPilotConfig();
+export async function POST(request: Request, context: { params: Promise<{ product: string }> }) {
+  const { product } = await context.params;
+  if (!isPilotProduct(product)) return denial(404);
+  const config = pilotConfig(product);
   const serviceKey = request.headers.get("X-Creekmasons-Service-Key");
   if (!config || !serviceKey || !timingSafeEqual(digest(serviceKey), digest(config.serviceKey))) {
     return denial(404);
@@ -42,7 +44,7 @@ export async function POST(request: Request) {
       return denial(403);
     }
     const now = Math.floor(Date.now() / 1000);
-    const result = withPilotStore(config.path, (db) => authorizeMacro(db, {
+    const result = withPilotStore(config.path, (db) => authorizeProduct(db, product, {
       issuer: config.issuer,
       subject: token.subject,
       clientId: token.clientId,

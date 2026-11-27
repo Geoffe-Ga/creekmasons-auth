@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import {
-  authorizeMacro,
-  issueMacroInvite,
-  redeemMacroInvite,
-  revokeMacroInvite,
+  authorizeProduct,
+  issueInvite,
+  redeemInvite,
+  revokeInvite,
   withPilotStore,
 } from "../lib/pilot-store.ts";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -35,42 +35,42 @@ test("verified invite binds one tenant and one scoped OAuth token until revocati
 
   try {
     const result = withPilotStore(path, (db) => {
-      const invite = issueMacroInvite(db, "TESTER@example.test", key, now);
-      assert.equal(redeemMacroInvite(db, { ...identity, verifiedEmail: "other@example.test" },
+      const invite = issueInvite(db, "macro", "TESTER@example.test", key, now);
+      assert.equal(redeemInvite(db, "macro", { ...identity, verifiedEmail: "other@example.test" },
         invite.code, "America/Los_Angeles", key, now), false);
-      assert.equal(redeemMacroInvite(db, identity, invite.code, "+01:00", key, now), false);
-      assert.equal(redeemMacroInvite(db, identity, invite.code, "Europe/London", key, now), true);
-      assert.equal(redeemMacroInvite(db, identity, invite.code, "Europe/London", key, now), false);
-      assert.equal(authorizeMacro(db, { ...access, createdAt: now - 1 }, now + 1), undefined);
-      assert.equal(authorizeMacro(db, { ...access, subject: "other" }, now + 1), undefined);
-      const granted = authorizeMacro(db, access, now + 1);
+      assert.equal(redeemInvite(db, "macro", identity, invite.code, "+01:00", key, now), false);
+      assert.equal(redeemInvite(db, "macro", identity, invite.code, "Europe/London", key, now), true);
+      assert.equal(redeemInvite(db, "macro", identity, invite.code, "Europe/London", key, now), false);
+      assert.equal(authorizeProduct(db, "macro", { ...access, createdAt: now - 1 }, now + 1), undefined);
+      assert.equal(authorizeProduct(db, "macro", { ...access, subject: "other" }, now + 1), undefined);
+      const granted = authorizeProduct(db, "macro", access, now + 1);
       assert.ok(granted);
       assert.equal(granted.time_zone, "Europe/London");
       assert.deepEqual(granted.scopes, ["nutrition:read"]);
-      assert.equal(authorizeMacro(db, { ...access, id: "fresh-token" }, now + 2), undefined);
+      assert.equal(authorizeProduct(db, "macro", { ...access, id: "fresh-token" }, now + 2), undefined);
       assert.deepEqual(
-        authorizeMacro(db, { ...access, scopes: ["nutrition:read", "nutrition:write"] }, now + 2),
+        authorizeProduct(db, "macro", { ...access, scopes: ["nutrition:read", "nutrition:write"] }, now + 2),
         granted,
       );
-      assert.equal(revokeMacroInvite(db, invite.id), true);
-      assert.equal(authorizeMacro(db, access, now + 2), undefined);
+      assert.equal(revokeInvite(db, "macro", invite.id), true);
+      assert.equal(authorizeProduct(db, "macro", access, now + 2), undefined);
 
-      const next = issueMacroInvite(db, identity.verifiedEmail, key, now + 2);
-      assert.equal(redeemMacroInvite(db, identity, next.code, "UTC", key, now + 2), true);
-      assert.equal(authorizeMacro(db, access, now + 3), undefined);
-      assert.equal(authorizeMacro(db, { ...access, id: "new-refresh", createdAt: now + 3 }, now + 3), undefined);
-      const reconnected = authorizeMacro(db, {
+      const next = issueInvite(db, "macro", identity.verifiedEmail, key, now + 2);
+      assert.equal(redeemInvite(db, "macro", identity, next.code, "UTC", key, now + 2), true);
+      assert.equal(authorizeProduct(db, "macro", access, now + 3), undefined);
+      assert.equal(authorizeProduct(db, "macro", { ...access, id: "new-refresh", createdAt: now + 3 }, now + 3), undefined);
+      const reconnected = authorizeProduct(db, "macro", {
         ...access, id: "fresh-token", clientId: "replaced-client", createdAt: now + 3, scopes: ["nutrition:write"],
       }, now + 3);
       assert.ok(reconnected);
       assert.equal(reconnected.account_id, granted.account_id);
       assert.deepEqual(reconnected.scopes, ["nutrition:write"]);
-      const expired = issueMacroInvite(db, "second@example.test", key, now);
-      assert.equal(redeemMacroInvite(db, { ...identity, subject: "other",
+      const expired = issueInvite(db, "macro", "second@example.test", key, now);
+      assert.equal(redeemInvite(db, "macro", { ...identity, subject: "other",
         verifiedEmail: "second@example.test" }, expired.code, "UTC", key, expired.expiresAt), false);
-      const revoked = issueMacroInvite(db, "second@example.test", key, now);
-      revokeMacroInvite(db, revoked.id);
-      assert.equal(redeemMacroInvite(db, { ...identity, subject: "other",
+      const revoked = issueInvite(db, "macro", "second@example.test", key, now);
+      revokeInvite(db, "macro", revoked.id);
+      assert.equal(redeemInvite(db, "macro", { ...identity, subject: "other",
         verifiedEmail: "second@example.test" }, revoked.code, "UTC", key, now + 2), false);
       return reconnected.account_id;
     });
@@ -81,6 +81,38 @@ test("verified invite binds one tenant and one scoped OAuth token until revocati
     } finally {
       db.close();
     }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("Iron and Macro grants share an account and revoke independently", () => {
+  const now = 200_000;
+  const directory = mkdtempSync(join(tmpdir(), "creekmasons-products-"));
+  try {
+    withPilotStore(join(directory, "state.sqlite3"), (store) => {
+      const macro = issueInvite(store, "macro", identity.verifiedEmail, key, now);
+      const iron = issueInvite(store, "iron", identity.verifiedEmail, key, now);
+      const token = {
+        issuer: identity.issuer, subject: identity.subject, clientId: "macro-client",
+        id: "macro-token", createdAt: now + 1, expiresAt: now + 60, scopes: ["nutrition:read"],
+      };
+      assert.equal(redeemInvite(store, "iron", identity, macro.code, "UTC", key, now), false);
+      assert.equal(redeemInvite(store, "macro", identity, macro.code, "UTC", key, now), true);
+      assert.equal(redeemInvite(store, "iron", identity, iron.code, "UTC", key, now), true);
+      assert.equal(authorizeProduct(store, "iron", token, now + 1), undefined);
+      const macroOwner = authorizeProduct(store, "macro", token, now + 1);
+      const ironToken = {
+        ...token, clientId: "iron-client", id: "iron-token", scopes: ["workouts:read"],
+      };
+      const ironOwner = authorizeProduct(store, "iron", ironToken, now + 1);
+      assert.ok(macroOwner && ironOwner);
+      assert.equal(macroOwner.account_id, ironOwner.account_id);
+      assert.equal(revokeInvite(store, "macro", iron.id), false);
+      assert.equal(revokeInvite(store, "iron", iron.id), true);
+      assert.equal(authorizeProduct(store, "iron", ironToken, now + 2), undefined);
+      assert.deepEqual(authorizeProduct(store, "macro", token, now + 2), macroOwner);
+    });
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

@@ -77,3 +77,9 @@ assistant's opaque-token audience and scopes on staging before opening the route
 testers. Keep the existing deployment and all production settings separate.
 
 [Clerk token verifier](https://clerk.com/docs/guides/configure/auth-strategies/oauth/verify-oauth-tokens)
+
+For the Iron rehearsal, configure the corresponding `PILOT_IRON_RESOURCE_URL`
+and `PILOT_IRON_CLIENT_ID` ending in `/oauth/clients/iron-openclaw.json`. Use a
+different `CREEKMASONS_IRON_SERVICE_KEY`, shared only with the private Iron
+service. Both invite flows use the same account and store. Grants, connections,
+scopes and revocation remain product-specific.

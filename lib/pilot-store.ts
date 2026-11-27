@@ -2,6 +2,7 @@ import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname, isAbsolute } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { pilotProducts, type PilotProduct } from "./pilot-config.ts";
 
 const schema = `
   CREATE TABLE IF NOT EXISTS pilot_accounts (
@@ -37,7 +38,6 @@ const schema = `
   );
 `;
 
-export const macroScopes = ["nutrition:read", "nutrition:write"] as const;
 type Invite = { id: string; expires_at: number; redeemed_at: number | null; revoked: number };
 type AccountGrant = {
   account_id: string;
@@ -46,7 +46,7 @@ type AccountGrant = {
   redeemed_at: number;
 };
 export type Identity = { issuer: string; subject: string; verifiedEmail: string };
-export type VerifiedMacroToken = {
+export type VerifiedPilotToken = {
   issuer: string;
   subject: string;
   clientId: string;
@@ -90,19 +90,20 @@ function transaction<T>(db: DatabaseSync, callback: () => T): T {
   }
 }
 
-export function issueMacroInvite(db: DatabaseSync, recipient: string, key: string, now: number) {
+export function issueInvite(db: DatabaseSync, product: PilotProduct, recipient: string, key: string, now: number) {
   const id = randomUUID();
   const code = randomBytes(32).toString("base64url");
   const expiresAt = now + 24 * 60 * 60;
   db.prepare(`
     INSERT INTO pilot_invites (id, token_digest, recipient_digest, product, expires_at)
-    VALUES (?, ?, ?, 'macro', ?)
-  `).run(id, tokenDigest(code), recipientDigest(recipient, key), expiresAt);
+    VALUES (?, ?, ?, ?, ?)
+  `).run(id, tokenDigest(code), recipientDigest(recipient, key), product, expiresAt);
   return { id, code, expiresAt };
 }
 
-export function redeemMacroInvite(
+export function redeemInvite(
   db: DatabaseSync,
+  product: PilotProduct,
   identity: Identity,
   code: string,
   timeZone: string,
@@ -122,12 +123,12 @@ export function redeemMacroInvite(
   return transaction(db, () => {
     const invite = db.prepare(`
       SELECT id, expires_at, redeemed_at, revoked FROM pilot_invites
-      WHERE token_digest = ? AND recipient_digest = ? AND product = 'macro'
-    `).get(tokenDigest(code), recipientDigest(identity.verifiedEmail, key)) as Invite | undefined;
+      WHERE token_digest = ? AND recipient_digest = ? AND product = ?
+    `).get(tokenDigest(code), recipientDigest(identity.verifiedEmail, key), product) as Invite | undefined;
     if (!invite || invite.expires_at <= now || invite.redeemed_at !== null || invite.revoked) {
       return false;
     }
-    if (findMacroGrant(db, identity.issuer, identity.subject)) return false;
+    if (findGrant(db, product, identity.issuer, identity.subject)) return false;
     const account = db.prepare(`
       INSERT INTO pilot_accounts (issuer, subject, id, time_zone) VALUES (?, ?, ?, ?)
       ON CONFLICT (issuer, subject) DO UPDATE SET time_zone = excluded.time_zone
@@ -136,35 +137,36 @@ export function redeemMacroInvite(
     db.prepare("UPDATE pilot_invites SET redeemed_at = ? WHERE id = ?").run(now, invite.id);
     db.prepare(`
       INSERT INTO pilot_grants (account_id, product, invite_id)
-      VALUES (?, 'macro', ?)
+      VALUES (?, ?, ?)
       ON CONFLICT (account_id, product) DO UPDATE SET invite_id = excluded.invite_id
-    `).run(account.id, invite.id);
+    `).run(account.id, product, invite.id);
     return true;
   });
 }
 
-export function findMacroGrant(db: DatabaseSync, issuer: string, subject: string) {
+export function findGrant(db: DatabaseSync, product: PilotProduct, issuer: string, subject: string) {
   return db.prepare(`
     SELECT a.id AS account_id, a.time_zone, i.id AS invite_id, i.redeemed_at
     FROM pilot_accounts a JOIN pilot_grants g ON a.id = g.account_id
     JOIN pilot_invites i ON i.id = g.invite_id
-    WHERE a.issuer = ? AND a.subject = ? AND g.product = 'macro'
+    WHERE a.issuer = ? AND a.subject = ? AND g.product = ?
       AND i.revoked = 0
-  `).get(issuer, subject) as AccountGrant | undefined;
+  `).get(issuer, subject, product) as AccountGrant | undefined;
 }
 
-export function revokeMacroInvite(db: DatabaseSync, id: string) {
-  return db.prepare("UPDATE pilot_invites SET revoked = 1 WHERE id = ? AND product = 'macro'")
-    .run(id).changes === 1;
+export function revokeInvite(db: DatabaseSync, product: PilotProduct, id: string) {
+  return db.prepare("UPDATE pilot_invites SET revoked = 1 WHERE id = ? AND product = ?")
+    .run(id, product).changes === 1;
 }
 
-export function authorizeMacro(db: DatabaseSync, token: VerifiedMacroToken, now: number) {
-  const consentMask = macroScopes.reduce(
+export function authorizeProduct(db: DatabaseSync, product: PilotProduct, token: VerifiedPilotToken, now: number) {
+  const productScopes: readonly string[] = pilotProducts[product].scopes;
+  const consentMask = productScopes.reduce(
     (mask, scope, index) => token.scopes.includes(scope) ? mask | (1 << index) : mask, 0,
   );
   if (!consentMask || token.expiresAt <= now || token.createdAt > now) return;
   return transaction(db, () => {
-    const grant = findMacroGrant(db, token.issuer, token.subject);
+    const grant = findGrant(db, product, token.issuer, token.subject);
     if (!grant || token.createdAt <= grant.redeemed_at) return;
     const priorConnection = db.prepare(`
       SELECT 1 FROM pilot_connections
@@ -183,13 +185,13 @@ export function authorizeMacro(db: DatabaseSync, token: VerifiedMacroToken, now:
       SELECT consent_mask FROM pilot_connections WHERE invite_id = ? AND client_id = ? AND token_digest = ?
     `).get(grant.invite_id, token.clientId, fingerprint) as { consent_mask: number } | undefined;
     if (current) {
-      const scopes = macroScopes.filter((_, index) =>
+      const scopes = productScopes.filter((_, index) =>
         (consentMask & current.consent_mask & (1 << index)) !== 0);
       return { account_id: grant.account_id, time_zone: grant.time_zone, scopes };
     }
   });
 }
 
-export function loadMacroGrant(path: string, issuer: string, subject: string) {
-  return withPilotStore(path, (db) => findMacroGrant(db, issuer, subject));
+export function loadGrant(path: string, product: PilotProduct, issuer: string, subject: string) {
+  return withPilotStore(path, (db) => findGrant(db, product, issuer, subject));
 }
