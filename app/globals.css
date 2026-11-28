@@ -80,3 +80,11 @@ p { max-width: 54ch; color: var(--muted); }
 }
 
 .auth-form { display: grid; justify-items: center; padding-block: 3rem; }
+
+.pilot { padding-block: 2.5rem; }
+.pilot section { margin-block: 1.5rem; }
+.pilot form { display: grid; gap: .7rem; max-width: 30rem; }
+.pilot label { display: grid; gap: .25rem; font-weight: 650; }
+.pilot input, .pilot button { font: inherit; padding: .4rem .65rem; }
+.pilot button { justify-self: start; cursor: pointer; }
+.pilot code { overflow-wrap: anywhere; }
